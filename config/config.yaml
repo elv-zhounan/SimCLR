@@ -1,5 +1,6 @@
 # dataset
 dataset_dir: "./datasets"
+workers: 2
 
 # train options
 seed: 42 # sacred handles automatic seeding when passed in the config

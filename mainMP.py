@@ -1,11 +1,13 @@
 import os
 # Master address for distributed data parallel
 os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["MASTER_PORT"] = "8000"
+os.environ["MASTER_PORT"] = "7777"
 # set avaible gpu cards
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ['CUDA_VISIBLE_DEVICES'] = '1, 2, 3, 4'
 
+import warnings
+warnings.filterwarnings("ignore")
 
 import numpy as np
 from loguru import logger
@@ -47,7 +49,7 @@ def init_dist(args):
     print('process group initialized')
 
 def prepare(args):
-    init_dist()
+    init_dist(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -88,7 +90,7 @@ def main(gpu, args):
 
     train_dataset = torchvision.datasets.CIFAR10(
         args.dataset_dir,
-        download=True,
+        download=False,
         transform=TransformsSimCLR(size=args.image_size),
     )
     train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -107,17 +109,17 @@ def main(gpu, args):
     encoder = get_resnet(args.resnet, pretrained=False)
     n_features = encoder.fc.in_features  # get dimensions of fc layer
     model = SimCLR(encoder, args.projection_dim, n_features)
-    model = model.to(args.device)
+    model = model.cuda()
 
     # optimizer / loss
     optimizer, scheduler = load_optimizer(args, model)
     criterion = NT_Xent(args.batch_size, args.temperature, args.world_size)
 
     # DDP / DP
-    if args.dataparallel:
-        # model = convert_model(model) #something abotut BN I personally did not do any BN sync thigs before 
-        model = DataParallel(model)
-    else:
+    # if args.dataparallel:
+    #     # model = convert_model(model) #something abotut BN I personally did not do any BN sync thigs before 
+    #     model = DataParallel(model)
+    # else:
         # syncBN 其实只需要在world size > 1的时候用
         # 不过话说回来, world size == 1, 谁也不会用ddp啊
 
@@ -126,10 +128,9 @@ def main(gpu, args):
         # 如果每个进程的batch_size较大，影响不大，如果batch_size很小，那么BN层作用就很小，这时希望对所有数据进行BN处理。
 
         # 实际使用时根据实际情况决定
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = DDP(model, device_ids=[gpu])
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    model = DDP(model, device_ids=[gpu])
 
-    model = model.cuda()
     writer = None
     if args.rank == 0:
         writer = SummaryWriter()
@@ -160,7 +161,7 @@ def main(gpu, args):
 
 def demo_main(gpu, args):
     args.gpu = gpu
-    init_dist(args)
+    prepare(args)
 
 if __name__ == "__main__":
 
@@ -168,6 +169,8 @@ if __name__ == "__main__":
     parser.add_argument('--nodes', type=int, default=1, help='number of all nodes in distributed training')
     parser.add_argument('--gpus', type=int, default=4, help='number of gpu per node')
     parser.add_argument('--node_rank', type=int, default=0, help='node rank in all nodes')
+    parser.add_argument('--test_init', action="store_true", help='test init process group related things')
+    parser.add_argument('--download_dataset', action="store_true", help='download_dataset')
     config = yaml_config_hook("./config/config.yaml")
     for k, v in config.items():
         parser.add_argument(f"--{k}", default=v, type=type(v))
@@ -175,9 +178,19 @@ if __name__ == "__main__":
     assert args.gpus == torch.cuda.device_count()
     args.world_size = args.gpus * args.nodes
     
-    # if not os.path.exists(args.model_path):
-    #     os.makedirs(args.model_path)
-    # mp.spawn(main, args=(args,), nprocs=args.gpus, join=True)
+    if args.test_init:
+        mp.spawn(demo_main, args=(args,), nprocs=args.gpus)
 
-    mp.spawn(demo_main, args=(args,), nprocs=args.gpus)
+    elif args.download_dataset:
+        train_dataset = torchvision.datasets.CIFAR10(
+            args.dataset_dir,
+            download=True,
+            transform=TransformsSimCLR(size=args.image_size),
+        )
+    else:
+        if not os.path.exists(args.model_path):
+            os.makedirs(args.model_path)
+        mp.spawn(main, args=(args,), nprocs=args.gpus, join=True)
+
+    
 
